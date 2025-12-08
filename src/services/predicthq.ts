@@ -49,8 +49,10 @@ interface PredictHQEvent {
     };
   }>;
   entities?: Array<{
+    entity_id?: string;
     name: string;
     type: string;
+    formatted_address?: string;
   }>;
   phq_attendance?: number;
   phq_rank?: number;
@@ -114,14 +116,40 @@ function transformEvent(predicthqEvent: PredictHQEvent): Event {
     };
   }
 
-  // Build address string
-  const addressParts = [
-    address?.name,
-    address?.street,
-    address?.locality,
-    address?.region,
-    address?.country,
-  ].filter(Boolean);
+  // Find venue entity with formatted_address (most reliable source)
+  const venueEntity = predicthqEvent.entities?.find(
+    (e) => e.type === "venue"
+  );
+  
+  // Get venue name from entity or address
+  const venueName = venueEntity?.name || address?.name || "Event Venue";
+  
+  // Build address string - prefer formatted_address from entity, then build from parts
+  let addressString = venueEntity?.formatted_address;
+  if (!addressString) {
+    const addressParts = [
+      address?.street,
+      address?.locality,
+      address?.region,
+      address?.country,
+    ].filter(Boolean);
+    addressString = addressParts.length > 0 
+      ? addressParts.join(", ") 
+      : (address?.name || "Location available");
+  }
+  
+  // Extract city from formatted_address or use locality
+  let city = address?.locality;
+  if (!city && venueEntity?.formatted_address) {
+    // Try to extract city from formatted address (usually second-to-last part before country)
+    const parts = venueEntity.formatted_address.split(",").map(p => p.trim());
+    if (parts.length >= 2) {
+      city = parts[parts.length - 2]; // Usually city is second-to-last
+    }
+  }
+
+  // Link to PredictHQ event page
+  const eventUrl = `https://www.predicthq.com/events/${predicthqEvent.id}`;
 
   return {
     id: predicthqEvent.id,
@@ -130,15 +158,15 @@ function transformEvent(predicthqEvent: PredictHQEvent): Event {
     startDate: predicthqEvent.start,
     endDate: predicthqEvent.end || predicthqEvent.start,
     timezone: predicthqEvent.timezone,
-    url: `https://www.predicthq.com/events/${predicthqEvent.id}`,
+    url: eventUrl,
     // PredictHQ doesn't provide event images directly, but we can use a placeholder or category-based image
     // For now, we'll leave it undefined and the UI will show a nice gradient placeholder
     imageUrl: undefined,
-    venue: geo || address
+    venue: geo || address || venueEntity
       ? {
-          name: address?.name || "Event Venue",
-          address: addressParts.join(", ") || "Location available",
-          city: address?.locality,
+          name: venueName,
+          address: addressString,
+          city: city,
           latitude: geo?.lat,
           longitude: geo?.lon,
         }
@@ -247,15 +275,6 @@ export async function searchEvents(filters: EventFilters = {}): Promise<Event[]>
         }
       }
       
-      console.error("PredictHQ API Error Details:", {
-        status: response.status,
-        statusText: response.statusText,
-        url: `${PREDICTHQ_API_BASE}/events/`,
-        errorDetails,
-        tokenSet: !!PREDICTHQ_API_TOKEN,
-        tokenLength: PREDICTHQ_API_TOKEN?.length || 0,
-      });
-      
       // Provide helpful error message based on status code
       if (response.status === 401 || response.status === 403) {
         errorMessage = `Authentication failed. Please check your PredictHQ API token. ${errorMessage}`;
@@ -277,7 +296,6 @@ export async function searchEvents(filters: EventFilters = {}): Promise<Event[]>
     
     return data.results.map(transformEvent);
   } catch (error) {
-    console.error("Error searching events:", error);
     throw error;
   }
 }
@@ -327,14 +345,6 @@ export async function getEventById(eventId: string): Promise<Event> {
     // Format: /v1/events/?id={eventId}
     const searchUrl = `${PREDICTHQ_API_BASE}/events/?id=${encodeURIComponent(eventId)}`;
     
-    console.log("🔍 Fetching event by ID using search endpoint:", {
-      eventId,
-      eventIdLength: eventId.length,
-      eventIdType: typeof eventId,
-      url: searchUrl,
-      apiBase: PREDICTHQ_API_BASE,
-    });
-    
     const response = await fetch(
       searchUrl,
       {
@@ -363,16 +373,6 @@ export async function getEventById(eventId: string): Promise<Event> {
         // If we can't parse the error, use the status text
       }
       
-      console.error("❌ PredictHQ API Error Details:", {
-        status: response.status,
-        statusText: response.statusText,
-        url: searchUrl,
-        eventId,
-        eventIdLength: eventId.length,
-        errorDetails,
-        fullErrorResponse: JSON.stringify(errorDetails, null, 2),
-      });
-      
       // Provide helpful error message based on status code
       if (response.status === 404) {
         errorMessage = `Event not found. The event ID "${eventId}" may be invalid, the event may no longer be available, or it might be from a different API. Please try searching for events again.`;
@@ -385,14 +385,6 @@ export async function getEventById(eventId: string): Promise<Event> {
     
     const responseData: PredictHQResponse = await response.json();
     
-    console.log("✅ API Response received:", {
-      eventId,
-      responseKeys: Object.keys(responseData),
-      hasResults: !!responseData.results,
-      resultsLength: responseData.results?.length || 0,
-      responseData: JSON.stringify(responseData, null, 2).substring(0, 1000), // First 1000 chars
-    });
-    
     // PredictHQ returns events in a results array
     if (!responseData.results || responseData.results.length === 0) {
       throw new Error(`Event not found. The event ID "${eventId}" may be invalid or the event may no longer be available.`);
@@ -402,31 +394,13 @@ export async function getEventById(eventId: string): Promise<Event> {
     const predicthqEvent = responseData.results.find((e: PredictHQEvent) => e.id === eventId);
     
     if (!predicthqEvent) {
-      console.error("❌ Event ID not found in results:", {
-        eventId,
-        returnedIds: responseData.results.map((e: PredictHQEvent) => e.id),
-      });
       throw new Error(`Event not found. The event ID "${eventId}" was not found in the API response.`);
     }
     
-    console.log("📦 Event found in results:", {
-      id: predicthqEvent.id,
-      title: predicthqEvent.title,
-      totalResults: responseData.results.length,
-    });
-    
     const event = transformEvent(predicthqEvent);
-    
-    console.log("✨ Transformed event:", {
-      id: event.id,
-      name: event.name,
-      hasVenue: !!event.venue,
-      hasDescription: !!event.description,
-    });
     
     return event;
   } catch (error) {
-    console.error("Error fetching event:", error);
     throw error;
   }
 }
@@ -443,9 +417,8 @@ export async function getEventsByIds(eventIds: string[]): Promise<Event[]> {
     // Fetch all events in parallel, but handle individual failures gracefully
     const promises = eventIds.map((id) => 
       getEventById(id).catch((error) => {
-        // Log error for individual events but don't fail the entire request
-        console.warn(`Failed to fetch event ${id}:`, error?.message || error);
-        return null; // Return null for failed events
+        // Return null for failed events (don't fail the entire request)
+        return null;
       })
     );
     
@@ -453,7 +426,6 @@ export async function getEventsByIds(eventIds: string[]): Promise<Event[]> {
     // Filter out null values (failed events)
     return results.filter((event): event is Event => event !== null);
   } catch (error) {
-    console.error("Error fetching events by IDs:", error);
     return [];
   }
 }

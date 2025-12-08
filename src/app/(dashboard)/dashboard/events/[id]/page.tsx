@@ -30,7 +30,9 @@ import {
 export default function EventDetailPage() {
   const params = useParams();
   const router = useRouter();
-  const eventId = params?.id as string | undefined;
+  // Extract eventId from params - handle both string and array cases
+  const eventIdParam = params?.id;
+  const eventId = Array.isArray(eventIdParam) ? eventIdParam[0] : (eventIdParam as string | undefined);
   
   const [event, setEvent] = useState<Event | null>(null);
   const [loading, setLoading] = useState(true);
@@ -41,7 +43,6 @@ export default function EventDetailPage() {
   useEffect(() => {
     // Validate eventId before attempting to load
     if (!eventId || typeof eventId !== 'string' || eventId.trim() === '') {
-      console.error("❌ Invalid event ID:", { eventId, params, eventIdType: typeof eventId });
       setError("Invalid event ID. Please check the URL and try again.");
       setLoading(false);
       return;
@@ -51,19 +52,10 @@ export default function EventDetailPage() {
       try {
         setLoading(true);
         setError(null);
-        console.log("🔍 Loading event with ID:", eventId);
         const eventData = await getEventById(eventId);
-        console.log("✅ Event loaded successfully:", { id: eventData.id, name: eventData.name });
         setEvent(eventData);
         setIsSaved(isEventSaved(eventId));
       } catch (err: any) {
-        console.error("❌ Error loading event:", {
-          error: err,
-          message: err?.message,
-          eventId,
-          eventIdType: typeof eventId,
-          eventIdLength: eventId?.length,
-        });
         // Show the actual error message from the API for better debugging
         setError(err?.message || "Failed to load event details. Please try again.");
       } finally {
@@ -76,6 +68,14 @@ export default function EventDetailPage() {
 
   // Handle save/unsave
   const handleSaveToggle = () => {
+    if (!eventId) {
+      toast.error("Cannot save event: Event ID is missing.", {
+        position: "top-right",
+        autoClose: 3000,
+      });
+      return;
+    }
+
     if (isSaved) {
       removeEventId(eventId);
       setIsSaved(false);
@@ -137,7 +137,28 @@ export default function EventDetailPage() {
 
   // Validate and handle ticket URL click
   const handleGetTickets = (e: React.MouseEvent<HTMLAnchorElement>) => {
-    if (!event?.url) {
+    // First check if event exists
+    if (!event) {
+      e.preventDefault();
+      toast.error("Event information is not available. Please refresh the page.", {
+        position: "top-right",
+        autoClose: 3000,
+      });
+      return;
+    }
+
+    // Check if event ID exists
+    if (!eventId || !event.id) {
+      e.preventDefault();
+      toast.error("Event ID is missing. Please try refreshing the page.", {
+        position: "top-right",
+        autoClose: 3000,
+      });
+      return;
+    }
+
+    // Check if URL exists
+    if (!event.url) {
       e.preventDefault();
       toast.error("Ticket information is not available for this event.", {
         position: "top-right",
@@ -174,11 +195,11 @@ export default function EventDetailPage() {
 
   if (error || !event) {
     const isNotFound = error?.includes("not found") || error?.includes("invalid");
-    const isSaved = isEventSaved(eventId);
+    const isSaved = eventId ? isEventSaved(eventId) : false;
     
     // Handle removing invalid event from saved events
     const handleRemoveFromSaved = () => {
-      if (isSaved) {
+      if (isSaved && eventId) {
         removeEventId(eventId);
         setIsSaved(false);
       }
@@ -352,7 +373,7 @@ export default function EventDetailPage() {
                   className="flex items-center justify-center gap-2 bg-gradient-to-r from-blue-600 to-purple-600 text-white px-6 py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 transition-all shadow-md hover:shadow-lg"
                   title={isPredictHQUrl ? "View event details on PredictHQ" : "Get tickets for this event"}
                 >
-                  <span>{isPredictHQUrl ? "View Event Details" : "Get Tickets"}</span>
+                  <span>Get Tickets</span>
                   <ExternalLink className="h-5 w-5" />
                 </a>
                 {isPredictHQUrl && (
