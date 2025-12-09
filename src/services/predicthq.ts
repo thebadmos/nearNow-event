@@ -15,10 +15,16 @@ import { Event, EventFilters } from "@/types/event";
 const PREDICTHQ_API_BASE = process.env.NEXT_PUBLIC_PREDICTHQ_API_BASE;
 const PREDICTHQ_API_TOKEN = process.env.NEXT_PUBLIC_PREDICTHQ_API_TOKEN || "";
 
-// Validate that token is set
+// Validate that token and base URL are set
 if (!PREDICTHQ_API_TOKEN) {
   console.warn(
     "WARNING: PREDICTHQ_API_TOKEN is not set. Please add NEXT_PUBLIC_PREDICTHQ_API_TOKEN to your .env.local file."
+  );
+}
+
+if (!PREDICTHQ_API_BASE) {
+  console.warn(
+    "WARNING: PREDICTHQ_API_BASE is not set. Please add NEXT_PUBLIC_PREDICTHQ_API_BASE to your .env.local file."
   );
 }
 
@@ -53,7 +59,13 @@ interface PredictHQEvent {
     name: string;
     type: string;
     formatted_address?: string;
+    url?: string;
+    website?: string;
   }>;
+  url?: string;
+  website?: string;
+  ticket_url?: string;
+  external_url?: string;
   phq_attendance?: number;
   phq_rank?: number;
   phq_viewing_rank?: number;
@@ -101,6 +113,92 @@ interface PredictHQResponse {
 }
 
 /**
+ * Geocoding result from Nominatim API
+ */
+interface GeocodingResult {
+  lat: string;
+  lon: string;
+  display_name: string;
+  type: string;
+  class?: string;
+  importance: number;
+  address?: {
+    country?: string;
+    country_code?: string;
+  };
+}
+
+/**
+ * Geocode a city or country name to coordinates
+ * Uses OpenStreetMap Nominatim API (free, no API key required)
+ * 
+ * @param location - City or country name (e.g., "Lagos", "Nigeria")
+ * @returns Promise with coordinates or null if geocoding fails
+ */
+async function geocodeLocation(location: string): Promise<{ lat: number; lon: number; isCountry: boolean } | null> {
+  try {
+    // Use Nominatim API for geocoding (free, no API key required)
+    const encodedLocation = encodeURIComponent(location);
+    let response: Response;
+    
+    try {
+      response = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodedLocation}&format=json&limit=1&addressdetails=1`,
+        {
+          headers: {
+            'User-Agent': 'EventManagementApp/1.0', // Required by Nominatim
+          },
+          mode: 'cors',
+        }
+      );
+    } catch (error: any) {
+      // Handle network errors (CORS, network failure, etc.)
+      console.warn(`Geocoding network error for "${location}":`, error.message);
+      return null;
+    }
+
+    if (!response.ok) {
+      console.warn(`Geocoding failed for "${location}": ${response.statusText}`);
+      return null;
+    }
+
+    const results: GeocodingResult[] = await response.json();
+
+    if (!results || results.length === 0) {
+      console.warn(`No geocoding results found for "${location}"`);
+      return null;
+    }
+
+    const result = results[0];
+    const lat = parseFloat(result.lat);
+    const lon = parseFloat(result.lon);
+
+    if (isNaN(lat) || isNaN(lon)) {
+      console.warn(`Invalid coordinates from geocoding for "${location}"`);
+      return null;
+    }
+
+    // Check if it's a country
+    // Nominatim returns class="place" and type="country" for countries
+    // Also check if the location name matches common country patterns
+    const locationLower = location.toLowerCase();
+    const isCountry = Boolean(
+      (result.class === "place" && result.type === "country") ||
+      result.type === "country" ||
+      (result.importance < 0.3 && !result.type.includes("city") && !result.type.includes("town")) ||
+      locationLower.includes("nigeria") ||
+      locationLower.includes("country") ||
+      (result.address?.country_code && result.address.country && locationLower.includes(result.address.country.toLowerCase()))
+    );
+
+    return { lat, lon, isCountry };
+  } catch (error) {
+    console.error(`Error geocoding location "${location}":`, error);
+    return null;
+  }
+}
+
+/**
  * Convert PredictHQ event to our simplified Event format
  */
 function transformEvent(predicthqEvent: PredictHQEvent): Event {
@@ -121,21 +219,41 @@ function transformEvent(predicthqEvent: PredictHQEvent): Event {
     (e) => e.type === "venue"
   );
   
+  // Also check other entity types for formatted_address
+  const entityWithAddress = predicthqEvent.entities?.find(
+    (e) => e.formatted_address
+  ) || venueEntity;
+  
   // Get venue name from entity or address
-  const venueName = venueEntity?.name || address?.name || "Event Venue";
+  const venueName = venueEntity?.name || entityWithAddress?.name || address?.name || "Event Venue";
   
   // Build address string - prefer formatted_address from entity, then build from parts
-  let addressString = venueEntity?.formatted_address;
+  let addressString = entityWithAddress?.formatted_address || venueEntity?.formatted_address;
+  
   if (!addressString) {
+    // Try to build address from available parts
     const addressParts = [
       address?.street,
       address?.locality,
       address?.region,
-      address?.country,
+      address?.country || predicthqEvent.country, // Use top-level country if address country is missing
     ].filter(Boolean);
-    addressString = addressParts.length > 0 
-      ? addressParts.join(", ") 
-      : (address?.name || "Location available");
+    
+    if (addressParts.length > 0) {
+      addressString = addressParts.join(", ");
+    } else if (address?.name && address.name !== venueName) {
+      // Use address name if it's different from venue name
+      addressString = address.name;
+    } else if (predicthqEvent.country) {
+      // At minimum, show the country
+      addressString = predicthqEvent.country;
+    } else if (geo) {
+      // If we have coordinates, show a basic location indicator
+      addressString = `${geo.lat.toFixed(4)}, ${geo.lon.toFixed(4)}`;
+    } else {
+      // Last resort: use a generic message
+      addressString = "Location available";
+    }
   }
   
   // Extract city from formatted_address or use locality
@@ -148,8 +266,34 @@ function transformEvent(predicthqEvent: PredictHQEvent): Event {
     }
   }
 
-  // Link to PredictHQ event page
-  const eventUrl = `https://www.predicthq.com/events/${predicthqEvent.id}`;
+  // Try to find external URL from PredictHQ API
+  // Check in order: ticket_url, external_url, url, website, or entity URLs
+  let eventUrl: string | undefined = undefined;
+  
+  if (predicthqEvent.ticket_url) {
+    eventUrl = predicthqEvent.ticket_url;
+  } else if (predicthqEvent.external_url) {
+    eventUrl = predicthqEvent.external_url;
+  } else if (predicthqEvent.url) {
+    eventUrl = predicthqEvent.url;
+  } else if (predicthqEvent.website) {
+    eventUrl = predicthqEvent.website;
+  } else if (predicthqEvent.entities) {
+    // Check entities for URLs (venue, organizer, etc.)
+    const entityWithUrl = predicthqEvent.entities.find(
+      (e) => e.url || e.website
+    );
+    if (entityWithUrl) {
+      eventUrl = entityWithUrl.url || entityWithUrl.website;
+    }
+  }
+  
+  // If no external URL found, generate a Google search URL for tickets
+  // This helps users find tickets even when PredictHQ doesn't provide a direct link
+  if (!eventUrl) {
+    const searchQuery = encodeURIComponent(`${predicthqEvent.title} tickets ${city || address?.locality || ''}`);
+    eventUrl = `https://www.google.com/search?q=${searchQuery}`;
+  }
 
   return {
     id: predicthqEvent.id,
@@ -184,10 +328,16 @@ function transformEvent(predicthqEvent: PredictHQEvent): Event {
  * @returns Promise with array of events
  */
 export async function searchEvents(filters: EventFilters = {}): Promise<Event[]> {
-  // Validate API token before making request
+  // Validate API token and base URL before making request
   if (!PREDICTHQ_API_TOKEN) {
     throw new Error(
       "PredictHQ API token is not configured. Please set NEXT_PUBLIC_PREDICTHQ_API_TOKEN in your .env.local file."
+    );
+  }
+
+  if (!PREDICTHQ_API_BASE) {
+    throw new Error(
+      "PredictHQ API base URL is not configured. Please set NEXT_PUBLIC_PREDICTHQ_API_BASE in your .env.local file."
     );
   }
 
@@ -196,13 +346,38 @@ export async function searchEvents(filters: EventFilters = {}): Promise<Event[]>
     const params = new URLSearchParams();
     
     // Add location filters
-    if (filters.latitude && filters.longitude) {
+    let searchLatitude = filters.latitude;
+    let searchLongitude = filters.longitude;
+    let searchRadius = filters.radius;
+
+    // If we have a city but no coordinates, geocode it first
+    if (!searchLatitude && !searchLongitude && filters.city) {
+      const geocodeResult = await geocodeLocation(filters.city);
+      if (geocodeResult) {
+        searchLatitude = geocodeResult.lat;
+        searchLongitude = geocodeResult.lon;
+        
+        // Use larger radius for countries (e.g., Nigeria) and smaller for cities
+        // Note: radius is in miles per EventFilters interface
+        if (geocodeResult.isCountry) {
+          searchRadius = searchRadius || 300; // 300 miles (~480km) for countries
+        } else {
+          searchRadius = searchRadius || 30; // 30 miles (~48km) for cities
+        }
+      } else {
+        // If geocoding fails, fall back to keyword search
+        console.warn(`Geocoding failed for "${filters.city}", falling back to keyword search`);
+        params.append("q", filters.city);
+      }
+    }
+
+    // Use location-based search if we have coordinates
+    if (searchLatitude && searchLongitude) {
       // PredictHQ location format: location_around.origin=lat,lon&location_around.radius=XXkm
-      params.append("location_around.origin", `${filters.latitude},${filters.longitude}`);
-      params.append("location_around.radius", `${filters.radius || 25}km`); // PredictHQ uses km
-    } else if (filters.city) {
-      // For city search, use the 'q' parameter for keyword search
-      params.append("q", filters.city);
+      params.append("location_around.origin", `${searchLatitude},${searchLongitude}`);
+      // Convert radius from miles to km (EventFilters.radius is in miles)
+      const radiusKm = searchRadius ? searchRadius * 1.60934 : 50;
+      params.append("location_around.radius", `${Math.round(radiusKm)}km`);
     }
     
     // Add date filters
@@ -239,15 +414,22 @@ export async function searchEvents(filters: EventFilters = {}): Promise<Event[]>
     params.append("sort", "-rank");
     
     // Make API request
-    const response = await fetch(
-      `${PREDICTHQ_API_BASE}/events/?${params.toString()}`,
-      {
-        headers: {
-          Authorization: `Bearer ${PREDICTHQ_API_TOKEN}`,
-          Accept: "application/json",
-        },
-      }
-    );
+    let response: Response;
+    try {
+      response = await fetch(
+        `${PREDICTHQ_API_BASE}/events/?${params.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${PREDICTHQ_API_TOKEN}`,
+            Accept: "application/json",
+          },
+          mode: 'cors',
+        }
+      );
+    } catch (error: any) {
+      // Handle network errors
+      throw new Error(`Failed to connect to PredictHQ API: ${error.message}. Please check your internet connection and API configuration.`);
+    }
     
     if (!response.ok) {
       // Try to get more detailed error information
@@ -312,9 +494,10 @@ export async function getPopularEvents(city?: string, lat?: number, lon?: number
   if (lat && lon) {
     filters.latitude = lat;
     filters.longitude = lon;
-    filters.radius = 50; // Wider radius for popular events (50km)
+    filters.radius = 50; // Wider radius for popular events (50 miles = ~80km)
   } else if (city) {
     filters.city = city;
+    // Let searchEvents handle geocoding and determine appropriate radius
   } else {
     filters.city = "New York"; // Default city
   }
@@ -333,10 +516,16 @@ export async function getPopularEvents(city?: string, lat?: number, lon?: number
  * @returns Promise with event details
  */
 export async function getEventById(eventId: string): Promise<Event> {
-  // Validate API token
+  // Validate API token and base URL
   if (!PREDICTHQ_API_TOKEN) {
     throw new Error(
       "PredictHQ API token is not configured. Please set NEXT_PUBLIC_PREDICTHQ_API_TOKEN in your .env.local file."
+    );
+  }
+
+  if (!PREDICTHQ_API_BASE) {
+    throw new Error(
+      "PredictHQ API base URL is not configured. Please set NEXT_PUBLIC_PREDICTHQ_API_BASE in your .env.local file."
     );
   }
 
@@ -345,15 +534,21 @@ export async function getEventById(eventId: string): Promise<Event> {
     // Format: /v1/events/?id={eventId}
     const searchUrl = `${PREDICTHQ_API_BASE}/events/?id=${encodeURIComponent(eventId)}`;
     
-    const response = await fetch(
-      searchUrl,
-      {
-        headers: {
-          Authorization: `Bearer ${PREDICTHQ_API_TOKEN}`,
-          Accept: "application/json",
-        },
-      }
-    );
+    let response: Response;
+    try {
+      response = await fetch(
+        searchUrl,
+        {
+          headers: {
+            Authorization: `Bearer ${PREDICTHQ_API_TOKEN}`,
+            Accept: "application/json",
+          },
+          mode: 'cors',
+        }
+      );
+    } catch (error: any) {
+      throw new Error(`Failed to connect to PredictHQ API: ${error.message}. Please check your internet connection and API configuration.`);
+    }
     
     if (!response.ok) {
       let errorMessage = `PredictHQ API error: ${response.status} ${response.statusText}`;

@@ -171,7 +171,7 @@ export default function EventDetailPage() {
     try {
       const url = new URL(event.url);
       // If URL is valid, let the default link behavior proceed
-      // Note: The link goes to PredictHQ's event page, which may not have direct ticket links
+      // URL could be: ticket_url, external_url, website, entity URL, or Google search
     } catch (error) {
       e.preventDefault();
       toast.error("Invalid ticket URL. Please try searching for this event online.", {
@@ -181,8 +181,8 @@ export default function EventDetailPage() {
     }
   };
 
-  // Check if URL is a PredictHQ URL (which may not have direct ticket links)
-  const isPredictHQUrl = event?.url?.includes("predicthq.com");
+  // Check if URL is a Google search URL (fallback when no external link available)
+  const isGoogleSearchUrl = event?.url?.includes("google.com/search");
 
   if (loading) {
     return (
@@ -371,14 +371,14 @@ export default function EventDetailPage() {
                   rel="noopener noreferrer"
                   onClick={handleGetTickets}
                   className="flex items-center justify-center gap-2 bg-gradient-to-r from-blue-600 to-purple-600 text-white px-6 py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 transition-all shadow-md hover:shadow-lg"
-                  title={isPredictHQUrl ? "View event details on PredictHQ" : "Get tickets for this event"}
+                  title={isGoogleSearchUrl ? "Search for tickets online" : "Get tickets for this event"}
                 >
                   <span>Get Tickets</span>
                   <ExternalLink className="h-5 w-5" />
                 </a>
-                {isPredictHQUrl && (
+                {isGoogleSearchUrl && (
                   <p className="text-xs text-gray-500 mt-2 text-center">
-                    Note: This links to PredictHQ event details. For tickets, search for "{event.name}" online.
+                    Searching for tickets online. Click to find ticket vendors.
                   </p>
                 )}
               </div>
