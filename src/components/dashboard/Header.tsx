@@ -3,14 +3,20 @@
  * 
  * Simple header for NearNow application.
  * Displays the app name and provides a clean navigation experience.
+ * Includes mobile hamburger menu button on the right side.
  */
 
 "use client";
 
-import { MapPin } from "lucide-react";
+import { MapPin, Menu, X } from "lucide-react";
 import Link from "next/link";
 
-export default function Header() {
+interface HeaderProps {
+  mobileMenuOpen?: boolean;
+  setMobileMenuOpen?: (isOpen: boolean) => void;
+}
+
+export default function Header({ mobileMenuOpen = false, setMobileMenuOpen }: HeaderProps) {
   return (
     <header className="sticky top-0 z-10 border-b border-gray-200 bg-white">
       <div className="flex h-16 items-center justify-between px-4 sm:px-6">
@@ -24,9 +30,27 @@ export default function Header() {
           </span>
         </Link>
 
-        {/* Tagline */}
-        <div className="hidden md:block text-sm text-gray-500 italic">
-          Discover what's happening near you
+        {/* Right side: Tagline (desktop) and Hamburger menu (mobile) */}
+        <div className="flex items-center gap-4">
+          {/* Tagline - hidden on mobile */}
+          <div className="hidden md:block text-sm text-gray-500 italic">
+            Discover what's happening near you
+          </div>
+
+          {/* Mobile hamburger menu button - only show on mobile */}
+          {setMobileMenuOpen && (
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="lg:hidden text-gray-600 hover:text-gray-900 p-2 -mr-2"
+              aria-label="Toggle mobile menu"
+            >
+              {mobileMenuOpen ? (
+                <X className="h-6 w-6" aria-hidden="true" />
+              ) : (
+                <Menu className="h-6 w-6" aria-hidden="true" />
+              )}
+            </button>
+          )}
         </div>
       </div>
     </header>

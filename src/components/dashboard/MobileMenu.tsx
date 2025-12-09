@@ -1,9 +1,8 @@
 // src/components/dashboard/MobileMenu.tsx
 "use client";
-import { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { Menu, X } from "lucide-react";
+import { X } from "lucide-react";
 import { sidebarLinks } from "./Sidebar";
 
 interface MobileMenuProps {
@@ -16,19 +15,6 @@ export default function MobileMenu({ isOpen, setIsOpen }: MobileMenuProps) {
 
   return (
     <>
-      {/* Mobile menu button */}
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="lg:hidden text-gray-600 hover:text-gray-900"
-      >
-        <span className="sr-only">Open mobile menu</span>
-        {isOpen ? (
-          <X className="h-6 w-6" aria-hidden="true" />
-        ) : (
-          <Menu className="h-6 w-6" aria-hidden="true" />
-        )}
-      </button>
-
       {/* Mobile menu overlay */}
       {isOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
